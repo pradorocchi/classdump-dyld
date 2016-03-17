@@ -13,23 +13,29 @@
 static BOOL inDebug = NO;
 #define CDLog(...) if (inDebug) NSLog(@"classdump-dyld : %@", [NSString stringWithFormat:__VA_ARGS__])
 
-#include "CommonDefines.m"
+#import "CommonDefines.h"
+#import "CommonFunctions.h"
+#import "ParsingFunctions.h"
+
 
 extern "C" int parseImage(char *image, BOOL writeToDisk, NSString *outputDir, BOOL getSymbols, BOOL isRecursive, BOOL buildOriginalDirs, BOOL simpleHeader, BOOL skipAlreadyFound, BOOL skipApplications);
 
 static void list_dir(const char *dir_name, BOOL writeToDisk, NSString *outputDir, BOOL getSymbols, BOOL recursive, BOOL simpleHeader, BOOL skipAlreadyFound, BOOL skipApplications);
 static NSMutableArray *allImagesProcessed;
 static uint8_t *_cacheData;
+// from http://networkpx.googlecode.com/svn/etc/dyldcache.cc
+struct cache_header {
+	char version[16];
+	uint32_t baseaddroff;
+	uint32_t unk2;
+	uint32_t startaddr;
+	uint32_t numlibs;
+
+	uint64_t dyldaddr;
+	//uint64_t codesignoff;
+};
 static struct cache_header *_cacheHead;
 static BOOL shouldDLopen32BitExecutables = NO;
-
-
-/****** Helper Functions ******/
-#include "CommonFunctions.m"
-
-/****** Parsing Functions ******/
-#include "ParsingFunctions.m"
-
 
 /****** Recursive file search ******/
 
@@ -58,7 +64,23 @@ static void list_dir(const char *dir_name, BOOL writeToDisk, NSString *outputDir
 		printf("  Scanning dir: %s...", dir_name);
     	printf("\n\e[F\e[J");
 
-		while  (entry && (entry->d_type & DT_DIR) && (locationOfString(dir_name, [outputDir UTF8String]) == 0 || ((locationOfString(dir_name, "/private/var") == 0  || locationOfString(dir_name, "/var") == 0 || locationOfString(dir_name, "//var") == 0 || locationOfString(dir_name, "//private/var") == 0) && (skipApplications || (!skipApplications && !strstr(dir_name, "Application")))) || locationOfString(dir_name, "//dev") == 0 || locationOfString(dir_name, "//bin") == 0 ||  locationOfString(dir_name, "/dev") == 0 || locationOfString(dir_name, "/bin") == 0 )) {
+		while (
+            entry && (entry->d_type & DT_DIR) &&
+            (
+                locationOfString(dir_name, [outputDir UTF8String]) == 0 ||
+                (
+                    (
+                        locationOfString(dir_name, "/private/var") == 0 ||
+                        locationOfString(dir_name, "/var") == 0 ||
+                        locationOfString(dir_name, "//var") == 0 ||
+                        locationOfString(dir_name, "//private/var") == 0
+                    ) && (skipApplications || (!skipApplications && !strstr(dir_name, "Application")))
+                ) ||
+                locationOfString(dir_name, "//dev") == 0 ||
+                locationOfString(dir_name, "//bin") == 0 ||
+                locationOfString(dir_name, "/dev") == 0 ||
+                locationOfString(dir_name, "/bin") == 0 )
+            ) {
 			entry = readdir(d);
 		}
 		if (!entry) {
@@ -73,9 +95,17 @@ static void list_dir(const char *dir_name, BOOL writeToDisk, NSString *outputDir
 			NSString *currentFile = [NSString stringWithCString:d_name encoding:NSUTF8StringEncoding];
 			NSString *imageToPass = [NSString stringWithFormat:@"%@/%@", currentPath, currentFile];
 
-			if ([imageToPass rangeOfString:@"classdump-dyld"].location == NSNotFound && [imageToPass rangeOfString:@"/dev"].location != 0 && [imageToPass rangeOfString:@"/bin"].location != 0) {
+			if (
+                    [imageToPass rangeOfString:@"classdump-dyld"].location == NSNotFound &&
+                    [imageToPass rangeOfString:@"/dev"].location != 0 &&
+                    [imageToPass rangeOfString:@"/bin"].location != 0
+                ) {
 				NSString *imageWithoutLastPart = [imageToPass stringByDeletingLastPathComponent];
-				if ([[imageWithoutLastPart lastPathComponent] rangeOfString:@".app"].location != NSNotFound || [[imageWithoutLastPart lastPathComponent] rangeOfString:@".framework"].location != NSNotFound || [[imageWithoutLastPart lastPathComponent] rangeOfString:@".bundle"].location != NSNotFound) {
+				if (
+                    [[imageWithoutLastPart lastPathComponent] rangeOfString:@".app"].location != NSNotFound ||
+                    [[imageWithoutLastPart lastPathComponent] rangeOfString:@".framework"].location != NSNotFound ||
+                    [[imageWithoutLastPart lastPathComponent] rangeOfString:@".bundle"].location != NSNotFound
+                ) {
 					NSString *skipString = [imageWithoutLastPart lastPathComponent];
 					//skipString = [skipString stringByDeletingPathExtension];
 					skipString = [skipString stringByReplacingOccurrencesOfString:@".framework" withString:@""];
@@ -86,7 +116,7 @@ static void list_dir(const char *dir_name, BOOL writeToDisk, NSString *outputDir
 						parseImage((char *)[imageToPass UTF8String], writeToDisk, outputDir, getSymbols, recursive, YES, simpleHeader, skipAlreadyFound, skipApplications);
 					}
 				} else {
-					parseImage((char *)[imageToPass UTF8String ], writeToDisk, outputDir, getSymbols, recursive, YES, simpleHeader, skipAlreadyFound, skipApplications);
+					parseImage((char *)[imageToPass UTF8String], writeToDisk, outputDir, getSymbols, recursive, YES, simpleHeader, skipAlreadyFound, skipApplications);
 				}
 			}
 			[p drain];
@@ -110,7 +140,6 @@ static void list_dir(const char *dir_name, BOOL writeToDisk, NSString *outputDir
 	closedir(d);
 }
 
-
 /****** The actual job ******/
 
 extern "C" int parseImage(char *image, BOOL writeToDisk, NSString *outputDir, BOOL getSymbols, BOOL isRecursive, BOOL buildOriginalDirs, BOOL simpleHeader, BOOL skipAlreadyFound, BOOL skipApplications) {
@@ -131,6 +160,8 @@ extern "C" int parseImage(char *image, BOOL writeToDisk, NSString *outputDir, BO
 		}
 	}
 
+	NSMutableArray *forbiddenClasses = generateForbiddenClassesArray(isRecursive);
+	NSMutableArray *forbiddenPaths = generateForbiddenPathsArray(isRecursive);
 	NSString *imageAsNSString = [[NSString alloc] initWithCString:image encoding:NSUTF8StringEncoding];
 	for (NSString *forbiddenPath in forbiddenPaths) {
 		if ([imageAsNSString rangeOfString:forbiddenPath].location != NSNotFound) {
@@ -1101,9 +1132,6 @@ int main(int argc, char **argv, char **envp) {
 		int result = 1;
 
 		allImagesProcessed = [NSMutableArray array];
-
-		generateForbiddenClassesArray(recursive);
-		generateForbiddenPathsArray(recursive);
 
 		NSString *inoutputDir = outputDir;
 

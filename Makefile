@@ -5,7 +5,7 @@ export ARCHS = armv7 arm64
 include $(THEOS)/makefiles/common.mk
 
 TOOL_NAME = classdump-dyld
-classdump-dyld_FILES = main.xm
+classdump-dyld_FILES = CommonDefines.m CommonFunctions.m ParsingFunctions.m main.xm
 classdump-dyld_LDFLAGS = -Wl,-segalign,0x4000
 
 include $(THEOS_MAKE_PATH)/tool.mk

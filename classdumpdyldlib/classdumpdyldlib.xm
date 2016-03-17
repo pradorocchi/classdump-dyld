@@ -13,12 +13,12 @@ static BOOL inCycript = NO;
 static BOOL inDebug = NO;
 #define CDLog(...) if (inDebug)NSLog(@"libclassdump-dyld : %@", [NSString stringWithFormat:__VA_ARGS__] )
 
-#include "../CommonDefines.m"
+#import "../CommonDefines.h"
+#import "../CommonFunctions.h"
+#import "../ParsingFunctions.h"
 
 static NSString * parseImage(char *image, BOOL writeToDisk, NSString *outputDir, BOOL getSymbols, BOOL isRecursive, BOOL buildOriginalDirs, BOOL simpleHeader, BOOL skipAlreadyFound);
-
-#include "../CommonFunctions.m"
-#include "../ParsingFunctions.m"
+extern "C" NSString * dumpImage(NSString *imagePath);
 
 static NSString * parseImage(char *image, BOOL writeToDisk, NSString *outputDir, BOOL getSymbols, BOOL isRecursive, BOOL buildOriginalDirs, BOOL simpleHeader, BOOL skipAlreadyFound) {
 	dyld_all_image_infos = _dyld_get_all_image_infos();
@@ -95,6 +95,7 @@ static NSString * parseImage(char *image, BOOL writeToDisk, NSString *outputDir,
 		BOOL canGetSuperclass = YES;
 		NSString *classNameNSToRelease = [[NSString alloc] initWithCString:names[i] encoding:NSUTF8StringEncoding];
 
+		NSMutableArray *forbiddenClasses = generateForbiddenClassesArray(isRecursive);
 		if ([forbiddenClasses indexOfObject:classNameNSToRelease] != NSNotFound) {
 			[classNameNSToRelease release];
 			continue;
@@ -673,7 +674,7 @@ static NSString * parseImage(char *image, BOOL writeToDisk, NSString *outputDir,
 
 @implementation classdumpdyld
 static NSString *parsedResult = nil;
-+(id)printResult{
++ (id)printResult {
 	return parsedResult;
 }
 @end
@@ -730,91 +731,43 @@ extern "C" NSString * dumpClass(Class *aClass) {
 }
 
 extern "C" NSString * dumpBundleForClass(Class *aClass) {
-	onlyOneClass = nil;
-
 	NSString *className = [(id)aClass description];
 	if (objc_getClass([className UTF8String]) == NULL) {
 		return [NSString stringWithFormat:@"Can't find class '%@'", className];
 	}
 
-	generateForbiddenClassesArray(NO);
 	NSString *imagePath = imagePathForClassName(className);
 	if (!imagePath) {
 		return [NSString stringWithFormat:@"Could not find image for class %@", className];
 	}
-	NSString *savePath = [[NSFileManager defaultManager] isWritableFileAtPath:@"/tmp"] ? @"/tmp" : [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
-	NSString *outputDir = [NSString stringWithFormat:@"%@/%@", savePath, [[imagePath lastPathComponent] stringByDeletingPathExtension]];
-	NSError *error = NULL;
-	BOOL isDir = NO;
-	[[NSFileManager defaultManager] fileExistsAtPath:outputDir isDirectory:&isDir];
-	if (!isDir) {
-		[[NSFileManager defaultManager] createDirectoryAtPath:outputDir withIntermediateDirectories:NO attributes:nil error:&error];
-		if (error) {
-			return [error description];
-		}
-	}
 
-	NSString *result = parseImage((char *)[imagePath UTF8String], YES, outputDir, NO, NO, NO, NO, NO);
-
-	NSArray *things = [[result componentsSeparatedByString:@"@@@@@"] retain];
-	[result release];
-
-	int total = [things count];
-	if (total > 2) {
-		NSLog(@"libclassdumpdyld: Writing headers to disk...");
-	}
-
-	for (unsigned i = 0; i < [things count]; i++) {
-		@autoreleasepool {
-			NSString *thing = [things objectAtIndex:i];
-			if (thing.length > 0) {
-				NSError *createError = nil;
-
-				NSString *filePath = [thing substringToIndex:[thing rangeOfString:@"&&&&&"].location];
-				thing = [thing substringFromIndex:[thing rangeOfString:@"&&&&&"].location+5];
-				NSString *dirtosave = [filePath stringByDeletingLastPathComponent];
-
-				[[NSFileManager defaultManager] createDirectoryAtPath:dirtosave withIntermediateDirectories:YES attributes:nil error:&createError];
-				FILE * pFile;
-				pFile = fopen ([filePath UTF8String], "w");
-
-				if (pFile != NULL) {
-					fputs ([thing UTF8String], pFile);
-					fclose (pFile);
-				} else {
-				}
-			}
-		}
-	}
-
-	[things release];
-
-	return [NSString stringWithFormat:@"Wrote all headers to %@", outputDir];
+	return dumpImage(imagePath);
 }
 
 extern "C" NSString * dumpBundle(NSBundle *aBundle) {
-	onlyOneClass = nil;
-
 	if (![aBundle isKindOfClass:objc_getClass("NSBundle")]) {
 		return [NSString stringWithFormat:@"Not a bundle '%@'", aBundle];
 	}
+
 	if (![aBundle isLoaded]) {
-		BOOL loaded = [aBundle load];
-		if (!loaded) {
+		if (![aBundle load]) {
 			return [NSString stringWithFormat:@"Can't load bundle '%@'", [aBundle bundleIdentifier]];
 		}
 	}
 
+	return dumpImage([aBundle executablePath]);
+}
+
+extern "C" NSString * dumpImage(NSString *imagePath) {
+	onlyOneClass = nil;
 	generateForbiddenClassesArray(NO);
-	NSString *imagePath = [aBundle executablePath];
 	NSString *savePath = [[NSFileManager defaultManager] isWritableFileAtPath:@"/tmp"] ? @"/tmp" : [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
-	NSString *outputDir = [NSString stringWithFormat:@"%@/%@", savePath, [[[aBundle bundlePath] lastPathComponent] stringByDeletingPathExtension] ?: [aBundle principalClass]];
+	NSString *outputDir = [NSString stringWithFormat:@"%@/%@", savePath, [[imagePath lastPathComponent] stringByDeletingPathExtension]];
+
 	NSError *error = NULL;
 	BOOL isDir = NO;
-	[[NSFileManager defaultManager] fileExistsAtPath:outputDir isDirectory:&isDir];
-	if (!isDir) {
-		[[NSFileManager defaultManager] createDirectoryAtPath:outputDir withIntermediateDirectories:NO attributes:nil error:&error];
-		if (error) {
+	if (![[NSFileManager defaultManager] fileExistsAtPath:outputDir isDirectory:&isDir] || !isDir) {
+		if (![[NSFileManager defaultManager] createDirectoryAtPath:outputDir withIntermediateDirectories:NO attributes:nil error:&error]) {
 			return [error description];
 		}
 	}
@@ -829,30 +782,24 @@ extern "C" NSString * dumpBundle(NSBundle *aBundle) {
 		NSLog(@"libclassdumpdyld: Writing headers to disk...");
 	}
 
-	for (unsigned i = 0; i < [things count]; i++) {
+	[things enumerateObjectsUsingBlock:^(NSString *thing, NSUInteger idx, BOOL *stop) {
 		@autoreleasepool {
-			NSString *thing = [things objectAtIndex:i];
-
 			if (thing.length > 0) {
-				NSError *createError = nil;
-
 				NSString *filePath = [thing substringToIndex:[thing rangeOfString:@"&&&&&"].location];
-				thing = [thing substringFromIndex:[thing rangeOfString:@"&&&&&"].location+5];
-				NSString *dirtosave = [filePath stringByDeletingLastPathComponent];
+				NSString *dirToSave = [filePath stringByDeletingLastPathComponent];
+				thing = [thing substringFromIndex:[thing rangeOfString:@"&&&&&"].location + 5];
 
-				[[NSFileManager defaultManager] createDirectoryAtPath:dirtosave withIntermediateDirectories:YES attributes:nil error:&createError];
-				FILE * pFile;
-				pFile = fopen ([filePath UTF8String], "w");
+				NSError *createError = nil;
+				[[NSFileManager defaultManager] createDirectoryAtPath:dirToSave withIntermediateDirectories:YES attributes:nil error:&createError];
 
+				FILE *pFile = fopen([filePath UTF8String], "w");
 				if (pFile != NULL) {
-					fputs ([thing UTF8String], pFile);
-					fclose (pFile);
-				} else {
+					fputs([thing UTF8String], pFile);
+					fclose(pFile);
 				}
 			}
 		}
-	}
-
+	}];
 	[things release];
 
 	return [NSString stringWithFormat:@"Wrote all headers to %@", outputDir];
